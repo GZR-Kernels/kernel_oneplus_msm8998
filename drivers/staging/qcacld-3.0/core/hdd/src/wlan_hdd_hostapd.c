@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012-2017 The Linux Foundation. All rights reserved.
+ * Copyright (c) 2012-2018 The Linux Foundation. All rights reserved.
  *
  * Previously licensed under the ISC license by Qualcomm Atheros, Inc.
  *
@@ -1519,6 +1519,7 @@ QDF_STATUS hdd_hostapd_sap_event_cb(tpSap_Event pSapEvent,
 	bool legacy_phymode;
 	tSap_StationDisassocCompleteEvent *disconnect_event;
 	hdd_station_info_t *stainfo;
+	cds_context_type *cds_ctx;
 
 	dev = (struct net_device *)usrDataForCallback;
 	if (!dev) {
@@ -1558,6 +1559,13 @@ QDF_STATUS hdd_hostapd_sap_event_cb(tpSap_Event pSapEvent,
 		return QDF_STATUS_E_FAILURE;
 	}
 
+	cds_ctx = cds_get_context(QDF_MODULE_ID_QDF);
+	if (!cds_ctx) {
+		hdd_err("QDF context is null");
+		return QDF_STATUS_E_FAILURE;
+	}
+
+
 	dfs_info.channel = pHddApCtx->operatingChannel;
 	sme_get_country_code(pHddCtx->hHal, dfs_info.country_code, &cc_len);
 
@@ -1577,6 +1585,14 @@ QDF_STATUS hdd_hostapd_sap_event_cb(tpSap_Event pSapEvent,
 			pSapEvent->sapevt.sapStartBssCompleteEvent.status;
 
 		qdf_atomic_set(&pHddCtx->dfs_radar_found, 0);
+
+		status = qdf_event_set(&cds_ctx->channel_switch_complete);
+
+		if (!QDF_IS_STATUS_SUCCESS(status)) {
+			hdd_err("set event failed");
+			goto stopbss;
+		}
+
 		wlansap_get_dfs_ignore_cac(pHddCtx->hHal, &ignoreCAC);
 
 		/* DFS requirement: DO NOT transmit during CAC. */
@@ -2713,6 +2729,7 @@ int hdd_softap_set_channel_change(struct net_device *dev, int target_channel,
 	hdd_context_t *pHddCtx = NULL;
 	hdd_adapter_t *sta_adapter;
 	hdd_station_ctx_t *sta_ctx;
+	cds_context_type *cds_ctx;
 
 	pHddCtx = WLAN_HDD_GET_CTX(pHostapdAdapter);
 	ret = wlan_hdd_validate_context(pHddCtx);
@@ -2740,7 +2757,13 @@ int hdd_softap_set_channel_change(struct net_device *dev, int target_channel,
 			return -EBUSY;
 		}
 	}
-
+	cds_ctx = cds_get_context(QDF_MODULE_ID_QDF);
+	if (!cds_ctx) {
+		QDF_TRACE(QDF_MODULE_ID_QDF, QDF_TRACE_LEVEL_FATAL,
+				"%s: Trying to open CDS without a PreOpen",
+				__func__);
+		return -EINVAL;
+	}
 	/*
 	 * Set the dfs_radar_found flag to mimic channel change
 	 * when a radar is found. This will enable synchronizing
@@ -2755,6 +2778,12 @@ int hdd_softap_set_channel_change(struct net_device *dev, int target_channel,
 		return -EBUSY;
 	}
 
+	status = qdf_event_reset(&cds_ctx->channel_switch_complete);
+
+	if (!QDF_IS_STATUS_SUCCESS(status)) {
+		cds_err("clear event failed");
+		return -EINVAL;
+	}
 	/*
 	 * Post the Channel Change request to SAP.
 	 */
@@ -4870,16 +4899,16 @@ static int __iw_set_ap_encodeext(struct net_device *dev,
 		/*Convert from 1-based to 0-based keying */
 		key_index--;
 	}
-	if (!ext->key_len)
-		return ret;
+
+	if (!ext->key_len || ext->key_len > CSR_MAX_KEY_LEN)
+		return -EINVAL;
 
 	qdf_mem_zero(&setKey, sizeof(tCsrRoamSetKey));
 
 	setKey.keyId = key_index;
 	setKey.keyLength = ext->key_len;
 
-	if (ext->key_len <= CSR_MAX_KEY_LEN)
-		qdf_mem_copy(&setKey.Key[0], ext->key, ext->key_len);
+	qdf_mem_copy(&setKey.Key[0], ext->key, ext->key_len);
 
 	if (ext->ext_flags & IW_ENCODE_EXT_GROUP_KEY) {
 		/*Key direction for group is RX only */
@@ -7851,6 +7880,13 @@ int wlan_hdd_cfg80211_start_bss(hdd_adapter_t *pHostapdAdapter,
 	/* Protection parameter to enable or disable */
 	pConfig->protEnabled = iniConfig->apProtEnabled;
 
+	pConfig->chan_switch_hostapd_rate_enabled =
+			iniConfig->chan_switch_hostapd_rate_enabled;
+	if (iniConfig->WlanMccToSccSwitchMode !=
+			QDF_MCC_TO_SCC_SWITCH_DISABLE) {
+		pConfig->chan_switch_hostapd_rate_enabled = false;
+	}
+
 	pConfig->enOverLapCh = iniConfig->gEnableOverLapCh;
 	pConfig->dtim_period = pBeacon->dtim_period;
 	hdd_debug("acs_mode %d", pConfig->acs_cfg.acs_mode);
@@ -7866,6 +7902,8 @@ int wlan_hdd_cfg80211_start_bss(hdd_adapter_t *pHostapdAdapter,
 		pConfig->acs_dfs_mode = wlan_hdd_get_dfs_mode(mode);
 	}
 
+	pConfig->user_config_channel = pConfig->channel;
+
 	hdd_debug("pConfig->channel %d, pConfig->acs_dfs_mode %d",
 		pConfig->channel, pConfig->acs_dfs_mode);
 
@@ -7878,6 +7916,12 @@ int wlan_hdd_cfg80211_start_bss(hdd_adapter_t *pHostapdAdapter,
 						     pBeacon->tail_len,
 						     WLAN_EID_COUNTRY);
 		if (pIe) {
+			if (pIe[1] < IEEE80211_COUNTRY_IE_MIN_LEN) {
+				hdd_err("Invalid Country IE len: %d", pIe[1]);
+				ret = -EINVAL;
+				goto error;
+			}
+
 			pConfig->ieee80211d = 1;
 			qdf_mem_copy(pConfig->countryCode, &pIe[2], 3);
 			sme_set_reg_info(hHal, pConfig->countryCode);
@@ -8253,7 +8297,12 @@ int wlan_hdd_cfg80211_start_bss(hdd_adapter_t *pHostapdAdapter,
 			pConfig->ch_width_orig = CH_WIDTH_20MHZ;
 	}
 
-	if (wlan_hdd_setup_driver_overrides(pHostapdAdapter)) {
+	if (cds_is_force_scc() &&
+			cds_mode_specific_get_channel(CDS_STA_MODE)) {
+		pConfig->channel = cds_mode_specific_get_channel(CDS_STA_MODE);
+		hdd_debug("force SCC is enabled and STA is active, override the SAP channel to %d",
+				pConfig->channel);
+	} else if (wlan_hdd_setup_driver_overrides(pHostapdAdapter)) {
 		ret = -EINVAL;
 		goto error;
 	}
@@ -8301,6 +8350,8 @@ int wlan_hdd_cfg80211_start_bss(hdd_adapter_t *pHostapdAdapter,
 	       (int)pConfig->RSNWPAReqIELength, pConfig->UapsdEnable);
 	hdd_debug("ProtEnabled = %d, OBSSProtEnabled = %d",
 	       pConfig->protEnabled, pConfig->obssProtEnabled);
+	hdd_debug("ChanSwitchHostapdRateEnabled = %d",
+			pConfig->chan_switch_hostapd_rate_enabled);
 
 	if (test_bit(SOFTAP_BSS_STARTED, &pHostapdAdapter->event_flags)) {
 		wlansap_reset_sap_config_add_ie(pConfig, eUPDATE_IE_ALL);
