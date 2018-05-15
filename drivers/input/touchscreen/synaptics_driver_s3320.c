@@ -3529,6 +3529,13 @@ static const struct file_operations key_switch_proc_fops = {
 	.open = simple_open,
 	.owner = THIS_MODULE,
 };
+
+static const struct file_operations key_rep_proc_fops = {
+	.write = key_switch_write_func,
+	.read =  key_switch_read_func,
+	.open = simple_open,
+	.owner = THIS_MODULE,
+};
 static ssize_t key_disable_read_func(struct file *file,
 char __user *user_buf, size_t count, loff_t *ppos)
 {
@@ -3595,8 +3602,18 @@ static int init_synaptics_proc(void)
 {
 	int ret = 0;
 	struct proc_dir_entry *prEntry_tmp  = NULL;
-
+#ifdef SUPPORT_TP_TOUCHKEY
+	struct proc_dir_entry *s1302 = NULL;
+#endif
 	prEntry_tp = proc_mkdir("touchpanel", NULL);
+
+#ifdef SUPPORT_TP_TOUCHKEY
+	s1302 = proc_mkdir("s1302", NULL);
+	if (s1302 == NULL) {
+		ret = -ENOMEM;
+		TPD_ERR("Couldn't create s1302\n");
+	}
+#endif
 
 	if (prEntry_tp == NULL) {
 		ret = -ENOMEM;
@@ -3690,6 +3707,13 @@ static int init_synaptics_proc(void)
 	if (prEntry_tmp == NULL) {
 		ret = -ENOMEM;
 		TPD_ERR("Couldn't create key_switch\n");
+	}
+
+	prEntry_tmp = proc_create("key_rep", 0664,
+	s1302, &key_rep_proc_fops);
+	if (prEntry_tmp == NULL) {
+		ret = -ENOMEM;
+		TPD_ERR("Couldn't create key_rep\n");
 	}
 
 	prEntry_tmp = proc_create("key_disable", 0664,
