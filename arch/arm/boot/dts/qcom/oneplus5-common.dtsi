@@ -461,6 +461,19 @@
 	qcom,mbhc-audio-jack-type = "4-pole-jack";
 };
 
+/*
+ * liuhaituo@MultiMediaAudio modified for adapation phone
+ * headset and AKG headset-mic 2018/4/26
+ */
+&slim_aud {
+	tasha_codec {
+		qcom,cdc-micbias1-mv = <1800>;
+		qcom,cdc-micbias2-mv = <2700>;
+		qcom,cdc-micbias3-mv = <1800>;
+		qcom,cdc-micbias4-mv = <1800>;
+	};
+};
+
 /* Audio */
 &soc {
 	i2c@c1b7000 {
@@ -526,7 +539,12 @@
 		fstab {
 			compatible = "android,fstab";
 			vendor {
-				status = "disabled";
+				compatible = "android,vendor";
+				dev = "/dev/block/platform/soc/1da4000.ufshc/by-name/vendor";
+				type = "ext4";
+				mnt_flags = "ro,barrier=1,discard";
+				fsmgr_flags = "wait";
+				status = "ok";
 			};
 
 			system {
